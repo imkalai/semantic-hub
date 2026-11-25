@@ -7,6 +7,11 @@ It runs on your own laptop: one Python process, with everything it stores in a l
 - **Backend:** Python, FastAPI, SQLite (SQLAlchemy), NetworkX, Chroma
 - **Frontend:** plain HTML, CSS and JavaScript modules in `static/`, in the Looker Helper design language. No npm and no build step.
 
+**Continuing development?** Start with [AGENTS.md](AGENTS.md) (how the code fits together and the rules to keep)
+and [docs/HANDOFF.md](docs/HANDOFF.md) (status, decisions and the plan for the next phase). GitHub Copilot picks up
+`.github/copilot-instructions.md`, `.github/instructions/`, prompt files in `.github/prompts/` and skills in
+`.github/skills/`.
+
 ## Run it
 
 ```powershell

@@ -1,0 +1,9 @@
+fastapi>=0.165
+uvicorn[standard]>=0.54
+pydantic>=2.14
+pydantic-settings>=2.16
+SQLAlchemy>=2.1
+networkx>=3.7
+chromadb>=1.5
+# Only needed with SH_METADATA_MODE=live:
+# google-cloud-bigquery>=3.25

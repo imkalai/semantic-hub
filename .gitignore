@@ -1,0 +1,8 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.env
+data/
+# Local tool settings (contain paths on this machine)
+.claude/

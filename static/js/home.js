@@ -1,6 +1,7 @@
 // @ts-check
 import { api } from "./api.js";
-import { esc, icon, relTime } from "./ui.js";
+import { scopeLabel, scopeQuery, state } from "./state.js";
+import { esc, icon, relTime, toast } from "./ui.js";
 
 const SOURCE = {
   graph_store: ["ok", "Graph store"],
@@ -28,7 +29,10 @@ function guardrails(report) {
       <summary><span class="sum-text">Guardrails<small>${notable ? `${notable} to look at` : "All checks passed"}</small></span></summary>
       <div class="acc-body">${checks.map((c) => {
         const [cls, label] = CHECK[c.status] || ["", c.status];
-        return `<div class="check"><span class="pill ${cls}">${label}</span><div><p><strong>${esc(c.label)}</strong></p><p>${esc(c.message)}</p></div></div>`;
+        const actions = (c.actions || []).map((/** @type {any} */ a) =>
+          `<button type="button" class="btn sm" data-approve="${esc(a.key)}">${esc(a.label)}</button>`).join(" ");
+        return `<div class="check"><span class="pill ${cls}">${label}</span><div><p><strong>${esc(c.label)}</strong></p><p>${esc(c.message)}</p>${
+          actions ? `<div class="row-btns">${actions}</div>` : ""}</div></div>`;
       }).join("")}</div>
     </details>`;
 }
@@ -39,6 +43,7 @@ const OPS = { equals: "=", not_equals: "≠", in: "in", not_in: "not in", contai
 let lastQuestion = "";
 /** @type {any} */
 let lastOutcome = null;
+let lastScope = state.scope;
 
 /** @param {any} c */
 function candidate(c) {
@@ -101,7 +106,7 @@ function outcome(o) {
       ? `<div class="err-box"><strong>This plan can't run.</strong><ul class="errs">${o.errors.map((/** @type {string} */ e) => `<li>${esc(e)}</li>`).join("")}</ul></div>` : "");
     body = planParts(o) + `
       <p class="small muted">Tables: ${r.tables.map((/** @type {string} */ t) => `<span class="mono">${esc(t)}</span>`).join(", ")}${
-        r.joins.length ? ` · approved joins: ${r.joins.map((/** @type {any} */ j) => `<span class="mono">${esc(j.name)}</span>`).join(", ")}` : ""}</p>`;
+        r.joins.length ? ` · joins: ${r.joins.map((/** @type {any} */ j) => `<span class="mono">${esc(j.name)}</span>`).join(", ")}` : ""}</p>`;
   } else if (o.status === "clarify") {
     head = `<h2 class="plan-title">${esc(o.clarification)}</h2>`;
     body = '<p class="small muted">Try naming a measure from the catalog, e.g. revenue, orders or churned accounts.</p>';
@@ -131,7 +136,7 @@ function outcome(o) {
 /** @param {HTMLElement} box */
 async function loadHistory(box) {
   try {
-    const items = await api("/api/questions?limit=8");
+    const items = await api(`/api/questions?limit=8&${scopeQuery()}`);
     box.innerHTML = items.length ? `
       <h2>Recent questions</h2>
       <div class="history">${items.map((/** @type {any} */ q) => {
@@ -147,16 +152,21 @@ async function loadHistory(box) {
 
 /** @param {HTMLElement} root */
 export async function renderHome(root) {
+  if (lastScope !== state.scope) {  // a different catalog or session: start fresh
+    lastScope = state.scope;
+    lastOutcome = null;
+  }
   root.innerHTML = `
     <div class="home-inner">
       <div class="hero">
         <h1>Ask your data in business terms</h1>
         <p>Semantic Hub maps your words to governed metrics, dimensions and approved joins, then plans and runs the query on BigQuery.</p>
         <form class="prompt" id="askForm">
-          <label for="ask" class="label" style="padding:4px 10px 0">Your question</label>
+          <label for="ask" class="label" style="padding:4px 10px 0">Your question · asking in <strong>${esc(scopeLabel())}</strong>
+            ${state.scope === "catalog" ? '· <a href="#/sessions">use your own tables</a>' : ""}</label>
           <textarea id="ask" rows="2" maxlength="1000" placeholder="e.g. Monthly turnover by region for web orders">${esc(lastQuestion)}</textarea>
           <div class="prompt-foot">
-            <div class="chips">${EXAMPLES.map(([l, t]) => `<button class="chip" type="button" data-ex="${esc(t)}">${esc(l)}</button>`).join("")}</div>
+            <div class="chips">${(state.scope === "catalog" ? EXAMPLES : []).map(([l, t]) => `<button class="chip" type="button" data-ex="${esc(t)}">${esc(l)}</button>`).join("")}</div>
             <button class="btn primary" type="submit" id="askBtn">Plan ${icon("send")}</button>
           </div>
         </form>
@@ -178,7 +188,7 @@ export async function renderHome(root) {
     btn.disabled = true;
     answer.innerHTML = '<div class="skeleton" style="height:200px"></div>';
     try {
-      lastOutcome = await api("/api/questions", { body: { question } });
+      lastOutcome = await api("/api/questions", { body: { question, scope: state.scope } });
       answer.innerHTML = outcome(lastOutcome);
       loadHistory(history);
     } catch (e) {
@@ -193,6 +203,21 @@ export async function renderHome(root) {
     ask.value = /** @type {HTMLElement} */ (b).dataset.ex || "";
     run();
   }));
+  // "Confirm …" buttons in the guardrails: record the decision, then plan the question again
+  answer.addEventListener("click", async (e) => {
+    const b = /** @type {HTMLButtonElement | null} */ (/** @type {HTMLElement} */ (e.target).closest("[data-approve]"));
+    if (!b) return;
+    b.disabled = true;
+    try {
+      await api("/api/approvals", { body: { key: b.dataset.approve, decision: "approved" } });
+      toast("Confirmed. Planning again…");
+      ask.value = lastOutcome?.question || ask.value;
+      await run();
+    } catch (err) {
+      toast(err.message, true);
+      b.disabled = false;
+    }
+  });
   history.addEventListener("click", async (e) => {
     const item = /** @type {HTMLElement} */ (e.target).closest("[data-q]");
     if (!item) return;
@@ -209,7 +234,7 @@ export async function renderHome(root) {
 
   let cat, health;
   try {
-    [cat, health] = await Promise.all([api("/api/catalog"), api("/api/health/full")]);
+    [cat, health] = await Promise.all([api(`/api/catalog?${scopeQuery()}`), api("/api/health/full")]);
   } catch (e) {
     /** @type {HTMLElement} */ (root.querySelector("#homeStatus")).innerHTML = `<p class="err-box">${esc(e.message)}</p>`;
     return;
@@ -224,8 +249,8 @@ export async function renderHome(root) {
       <a class="btn sm" href="#/health">See health checks</a>
     </div>
     <div class="section-head">
-      <div><h2>Ontology</h2><p class="muted small">Read from <span class="pill ${cls}">${esc(label)}</span>${s.note ? ` · ${esc(s.note)}` : ""}</p></div>
-      <a class="btn sm quiet" href="#/catalog">Browse the catalog</a>
+      <div><h2>Ontology: ${esc(scopeLabel())}</h2><p class="muted small">Read from <span class="pill ${cls}">${esc(label)}</span>${s.note ? ` · ${esc(s.note)}` : ""}</p></div>
+      <a class="btn sm quiet" href="#/catalog">Browse it</a>
     </div>
     <div class="kpis">
       ${[["Metrics", s.metrics], ["Dimensions", s.dimensions], ["Tables", s.tables], ["Approved joins", s.joins], ["Synonyms", s.synonyms]]

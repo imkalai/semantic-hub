@@ -6,7 +6,7 @@ Only metadata calls and dry runs are made: no table data is ever read.
 import logging
 
 from app.config import get_settings
-from app.schemas.meta import ColumnMeta, DatasetInfo, ProjectInfo, TableInfo, TableMeta
+from app.schemas.meta import ColumnMeta, DatasetInfo, KeyConstraint, ProjectInfo, TableInfo, TableMeta
 from app.services.metadata.base import MetadataError, MetadataProvider
 from app.services.metadata.pii import mark_pii
 from app.services.text import humanize
@@ -99,9 +99,41 @@ class LiveBigQuery(MetadataProvider):
                 row_count=t.num_rows, size_bytes=t.num_bytes,
                 partition_field=part.field if part else None, partition_type=part.type_ if part else None,
                 clustering=list(t.clustering_fields or []),
+                last_modified=t.modified.isoformat() if t.modified else None,
                 columns=mark_pii(_columns(t.schema)),
             ))
         return metas
+
+    def get_constraints(self, project: str, dataset: str) -> list[KeyConstraint]:
+        """Declared primary/foreign keys from INFORMATION_SCHEMA (a small metadata query, no table data)."""
+        from google.cloud import bigquery
+
+        sql = f"""
+            SELECT tc.constraint_type, tc.table_name, k.column_name, k.ordinal_position,
+                   c.table_name AS ref_table, c.column_name AS ref_column
+            FROM `{project}.{dataset}.INFORMATION_SCHEMA.TABLE_CONSTRAINTS` tc
+            JOIN `{project}.{dataset}.INFORMATION_SCHEMA.KEY_COLUMN_USAGE` k USING (constraint_name)
+            LEFT JOIN `{project}.{dataset}.INFORMATION_SCHEMA.CONSTRAINT_COLUMN_USAGE` c
+              ON tc.constraint_type = 'FOREIGN KEY' AND c.constraint_name = tc.constraint_name
+            ORDER BY tc.constraint_name, k.ordinal_position"""
+        client = _client(get_settings().gcp_billing_project or project)
+        try:
+            rows = list(client.query(sql, job_config=bigquery.QueryJobConfig(use_query_cache=True)).result())
+        except Exception as exc:  # noqa: BLE001  (no permission, or constraints unsupported: treat as none)
+            log.warning("Couldn't read key constraints for %s.%s: %s", project, dataset, exc)
+            return []
+        out: dict[tuple, KeyConstraint] = {}
+        for r in rows:
+            kind = "primary" if r.constraint_type == "PRIMARY KEY" else "foreign"
+            key = (kind, r.table_name, r.ref_table)
+            c = out.setdefault(key, KeyConstraint(
+                kind=kind, table=f"{project}.{dataset}.{r.table_name}",
+                ref_table=f"{project}.{dataset}.{r.ref_table}" if r.ref_table else None, columns=[]))
+            if r.column_name not in c.columns:
+                c.columns.append(r.column_name)
+            if r.ref_column and r.ref_column not in c.ref_columns:
+                c.ref_columns.append(r.ref_column)
+        return list(out.values())
 
     def dry_run_bytes(self, project: str, sql: str) -> int | None:
         from google.cloud import bigquery

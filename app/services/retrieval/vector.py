@@ -30,25 +30,31 @@ def client():
         raise VectorIndexError(f"Couldn't open the Chroma index: {exc}") from exc
 
 
-class VectorIndex:
-    """One collection. Its metadata records which embedding model made the vectors ('signature'), so vectors
-    from a different model or size are never mixed: a changed signature means a full rebuild."""
+def collection_name(scope: str) -> str:
+    """'catalog' -> semantic_metadata, 'session:7' -> session_7 (Chroma allows letters, digits, . _ -)."""
+    return COLLECTION if scope == "catalog" else scope.replace(":", "_")
 
-    def __init__(self):
+
+class VectorIndex:
+    """One collection per scope. Its metadata records which embedding model made the vectors ('signature'),
+    so vectors from a different model or size are never mixed: a changed signature means a full rebuild."""
+
+    def __init__(self, scope: str = "catalog"):
         self.client = client()
+        self.name = collection_name(scope)
 
     def collection(self, signature: str | None = None, *, create: bool = True):
         try:
-            col = self.client.get_collection(COLLECTION, embedding_function=None)
+            col = self.client.get_collection(self.name, embedding_function=None)
         except Exception:  # noqa: BLE001  (doesn't exist yet)
             if not create:
                 return None
-            return self.client.create_collection(COLLECTION, embedding_function=None,
+            return self.client.create_collection(self.name, embedding_function=None,
                                                  metadata={"hnsw:space": "cosine", "signature": signature or ""})
         if signature is not None and (col.metadata or {}).get("signature") != signature:
-            log.info("Embedding model changed; rebuilding the vector index")
-            self.client.delete_collection(COLLECTION)
-            return self.client.create_collection(COLLECTION, embedding_function=None,
+            log.info("Embedding model changed; rebuilding the vector index %s", self.name)
+            self.client.delete_collection(self.name)
+            return self.client.create_collection(self.name, embedding_function=None,
                                                  metadata={"hnsw:space": "cosine", "signature": signature})
         return col
 
@@ -66,7 +72,7 @@ class VectorIndex:
 
     def reset(self) -> None:
         if self.collection(create=False) is not None:
-            self.client.delete_collection(COLLECTION)
+            self.client.delete_collection(self.name)
 
     def query(self, embedding: list[float], n: int, where: dict | None = None) -> list[dict]:
         col = self.collection(create=False)

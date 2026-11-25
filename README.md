@@ -27,6 +27,13 @@ On first start the graph store is seeded from the catalog automatically. The def
 .\.venv\Scripts\python -m app.cli search "turnover by region"   # show what retrieval finds
 .\.venv\Scripts\python -m app.cli plan "monthly turnover by region" --json   # plan a question
 .\.venv\Scripts\python -m app.cli healthcheck          # exit code 1 when not ready; --json for CI
+
+# Sessions: an ontology built from the BigQuery tables you pick
+.\.venv\Scripts\python -m app.cli session create --name "Ops" --tables acme-ops.warehouse.stock_levels,acme-ops.warehouse.warehouses
+.\.venv\Scripts\python -m app.cli session list
+.\.venv\Scripts\python -m app.cli session review 1     # what was inferred, with approval keys
+.\.venv\Scripts\python -m app.cli session build 1 --force
+.\.venv\Scripts\python -m app.cli plan "total stock level units on hand by warehouse city" --session 1
 ```
 
 **Index** reads the details of every catalog table from BigQuery (metadata only, never table data) into the SQLite metadata store. It then writes one short document per metric, dimension and table, plus one per raw column the catalog doesn't cover yet (keys left out, and never sample values of personal-data columns). Only new or changed documents are embedded with Cortex and stored in Chroma. If the embedding model changes, the index is rebuilt.
@@ -55,12 +62,40 @@ All passing: **Ready for runtime**. Otherwise: **Repair graph or rerun bootstrap
 | Metadata retrieval (Chroma + SQLite) | `app/services/retrieval/`, `/api/retrieval/*` | Phase 2 |
 | Query planning (Cortex LLM) + ontology resolution | `app/services/planning/`, `/api/questions` | Phase 3 |
 | Validation and guardrails | `app/services/guardrails/` | Phase 4 |
+| Dynamic sessions (ontology from selected BigQuery tables), approvals | `app/services/sessions/`, `/api/sessions`, `/api/approvals` | Phase A |
+| Looker source | `app/services/sessions/looker.py` | Placeholder |
 | Execution (BigQuery) | | Next |
 | Ontology to Looker mapping | | Later |
 
 **Why not Neo4j:** the app ships to individual laptops. An ontology of metrics, dimensions, joins and synonyms is small, so nodes and edges in SQLite (unique ids, unique edges and foreign keys stand in for Neo4j constraints) loaded into NetworkX for traversal are enough. The graph sits behind `SqliteGraphStore`, so another store can replace it later.
 
 **Fallback:** if the graph store is empty, unreadable or doesn't match the catalog, the app builds the ontology straight from the JSON catalog and says so (Catalog page, `/api/catalog` → `summary.source`).
+
+## Sessions: ontologies built on demand
+
+A hand-written catalog can't cover every project and dataset. A **session** builds the ontology for the BigQuery tables someone picks, from their metadata only, so table size doesn't matter. Pick them on the **Sessions** page, then choose the session in **Working in** at the top to ask questions in it.
+
+**Where a session's concepts come from**, strongest first:
+
+| Source | Gives | Trust |
+|---|---|---|
+| Curated catalog (`catalog/semantic_catalog.json`) | Its metrics, dimensions and joins, for the selected tables it covers | certified |
+| Looker | Placeholder, off (`SH_LOOKER_MODE=off`). See `app/services/sessions/looker.py`. | certified, later |
+| BigQuery | Tables, partition dates, declared primary and foreign keys, personal-data policy tags | declared |
+| Inference | A row count per table; sums or averages of numeric columns (money and percent spotted by name); dimensions for text, yes/no and date columns; joins where a column matches another table's key | inferred |
+| Approvals | People's decisions on inferred items | certified |
+
+The same thing (a metric on a column with an aggregation, a dimension on a column, a join between two tables) is kept once, from the strongest source. Keys aren't offered as dimensions or measures.
+
+**Review.** Each session's page lists what isn't certified. You can **Confirm**, **Edit** (label, synonyms, calculation, relationship, personal-data flag, primary key) or **Reject** each item. Decisions are keyed by BigQuery names (e.g. `join:proj.ds.accounts:proj.ds.regions:region=region`), so they apply to every session over the same tables, now and later, and outlive the session.
+
+**Guardrails for guesses:**
+- A plan that uses a **guessed join is blocked** until the join is confirmed: the join decides which rows are combined. The plan card has a **Confirm** button for it.
+- Guessed metrics and dimensions get a **warning** with their definition.
+
+**Caching.** A fingerprint of the tables' schemas and last-modified times, declared keys, the curated catalog and the relevant approvals is stored. **Check for changes** rebuilds only when it differs. Each session has its own graph (`ontology_nodes` / `ontology_edges` with `scope = session:<id>`) and its own Chroma collection. The curated catalog is the scope `catalog`.
+
+**Tip:** declaring primary and foreign keys in BigQuery (they're declared, not enforced) turns guessed joins into declared ones that need no confirmation.
 
 ## Metadata retrieval
 

@@ -178,6 +178,13 @@ def check_bigquery(loaded: LoadedCatalog | None) -> Check:
                  "Set SH_METADATA_MODE=live to use real BigQuery." if status == "warn" else "")
 
 
+def check_looker() -> Check:
+    from app.services.sessions.looker import LookerSource
+
+    status, detail = LookerSource().health()
+    return Check("Cortex / BigQuery", "Looker", status, detail)
+
+
 # ---------- graph store and completeness ----------
 
 def check_graph_store(db: Session) -> Check:
@@ -231,7 +238,7 @@ def run_healthcheck(db: Session) -> dict:
     catalog_check.ms = int((time.perf_counter() - start) * 1000)
     checks += [catalog_check, _timed(check_sqlite), _timed(check_chroma), _timed(lambda: check_index(db, loaded)),
                _timed(check_cortex),
-               _timed(lambda: check_bigquery(loaded)), _timed(lambda: check_graph_store(db)),
+               _timed(lambda: check_bigquery(loaded)), _timed(check_looker), _timed(lambda: check_graph_store(db)),
                _timed(lambda: check_completeness(db, loaded))]
     failed = [c for c in checks if c.status == "fail"]
     if not failed:

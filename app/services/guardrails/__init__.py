@@ -34,6 +34,7 @@ class GuardrailCheck(BaseModel):
     status: Status
     message: str
     suggestions: list[str] = Field(default_factory=list)
+    actions: list[dict] = Field(default_factory=list)  # {"key", "label"}: items a person can confirm
 
 
 class GuardrailReport(BaseModel):
@@ -149,9 +150,9 @@ def match_filter_values(c: _Ctx, plan: QueryPlan) -> GuardrailCheck:
 # ---------- rules that pass, warn or block ----------
 
 def approved_joins(c: _Ctx, r: ResolvedPlan) -> GuardrailCheck:
-    names = [j.name for j in r.joins]
-    return GuardrailCheck(rule="approved_joins", label="Approved joins only", status="pass",
-                          message=f"Uses only approved joins: {', '.join(names)}." if names else "No joins needed.")
+    names = [f"{j.name} ({j.trust})" for j in r.joins]
+    return GuardrailCheck(rule="approved_joins", label="Catalog joins only", status="pass",
+                          message=f"Uses only joins from the catalog: {', '.join(names)}." if names else "No joins needed.")
 
 
 def no_double_counting(c: _Ctx, r: ResolvedPlan) -> GuardrailCheck:
@@ -211,6 +212,43 @@ def personal_data(c: _Ctx, r: ResolvedPlan) -> GuardrailCheck:
                           message=f"{labels} is personal data, so it can't be grouped by or filtered on.")
 
 
+def confirmed_definitions(c: _Ctx, r: ResolvedPlan) -> list[GuardrailCheck]:
+    """Inferred items are guesses. A guessed join decides which rows are combined, so it must be confirmed
+    before the plan can run; guessed metrics and dimensions only get a warning."""
+    joins = [j for j in r.joins if j.trust == "inferred"]
+    p = r.plan
+    concepts = [("metric", m) for m in dict.fromkeys(x for m in p.metrics for x in [m, *metric_parts(c.onto, m)])]
+    concepts += [("dimension", d) for d in dict.fromkeys(p.dimensions + ([p.time_dimension] if p.time_dimension else [])
+                                                          + [f.dimension for f in p.filters])]
+    guessed = [(k, n) for k, n in concepts if (c.node(k, n) or {}).get("props", {}).get("trust") == "inferred"]
+    checks = []
+    if joins:
+        checks.append(GuardrailCheck(
+            rule="confirmed_joins", label="Joins confirmed", status="block",
+            message="These joins were guessed from column names: " + "; ".join(
+                f"{j.left} → {j.right} on " + " and ".join(f"{k['left']} = {k['right']}" for k in j.on)
+                + f" ({j.relationship.replace('_', ' ')})" for j in joins) + ". Confirm them if they're right.",
+            actions=[{"key": j.key, "label": f"Confirm {j.left} → {j.right}"} for j in joins if j.key]))
+    else:
+        checks.append(GuardrailCheck(rule="confirmed_joins", label="Joins confirmed", status="pass",
+                                     message="Every join used is certified or declared." if r.joins else "No joins needed."))
+    if guessed:
+        checks.append(GuardrailCheck(
+            rule="confirmed_definitions", label="Definitions confirmed", status="warn",
+            message="Not confirmed yet, so check the definition: " + ", ".join(
+                f"{c.label(k, n)} ({_definition(c, k, n)})" for k, n in guessed) + ".",
+            actions=[{"key": c.node(k, n)["props"]["key"], "label": f"Confirm {c.label(k, n)}"}
+                     for k, n in guessed if c.node(k, n)["props"].get("key")]))
+    return checks
+
+
+def _definition(c: _Ctx, kind: str, name: str) -> str:
+    p = c.node(kind, name)["props"]
+    if kind == "metric":
+        return "count of rows" if p["agg"] == "count" else f"{p['agg'].replace('_', ' ')} of {p['table']}.{p['column']}"
+    return f"{p['table']}.{p['column']}"
+
+
 def row_limits(c: _Ctx, r: ResolvedPlan) -> GuardrailCheck:
     s = get_settings()
     if len(r.plan.dimensions) > s.max_group_by:
@@ -236,8 +274,8 @@ def apply_guardrails(db: Session, onto: Ontology, resolved: ResolvedPlan) -> tup
         new.plan.assumptions = list(dict.fromkeys(new.plan.assumptions))
         new.summary = describe(onto, new.plan)
         resolved = new
-    checks += [approved_joins(c, resolved), no_double_counting(c, resolved), personal_data(c, resolved),
-               row_limits(c, resolved)]
+    checks += [approved_joins(c, resolved), *confirmed_definitions(c, resolved), no_double_counting(c, resolved),
+               personal_data(c, resolved), row_limits(c, resolved)]
     return resolved, _report(checks)
 
 

@@ -42,8 +42,31 @@ def init_db() -> None:
     """Create any missing tables. The graph store's constraints are created here too (see bootstrap)."""
     from app import models  # noqa: F401  (registers tables)
 
+    _upgrade_sqlite()
     Base.metadata.create_all(get_engine())
     log.info("Database ready at %s", get_settings().db_path)
+
+
+# Tables holding only derived data (rebuilt by bootstrap and indexing), and columns added since the first
+# release. Small enough not to need a migration tool yet.
+_DERIVED = ["ontology_edges", "ontology_nodes", "index_documents"]
+_ADDED_COLUMNS = {"questions": "scope", "bootstrap_runs": "scope", "index_runs": "scope"}
+
+
+def _upgrade_sqlite() -> None:
+    from sqlalchemy import inspect
+
+    engine = get_engine()
+    insp = inspect(engine)
+    existing = set(insp.get_table_names())
+    with engine.begin() as conn:
+        if "ontology_nodes" in existing and "scope" not in {c["name"] for c in insp.get_columns("ontology_nodes")}:
+            log.info("Upgrading the graph store to scoped tables; it's rebuilt from the catalog")
+            for t in _DERIVED:
+                conn.execute(text(f"DROP TABLE IF EXISTS {t}"))
+        for table, column in _ADDED_COLUMNS.items():
+            if table in existing and column not in {c["name"] for c in insp.get_columns(table)}:
+                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} VARCHAR(40) DEFAULT 'catalog'"))
 
 
 def check_db() -> tuple[bool, str]:

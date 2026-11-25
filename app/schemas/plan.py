@@ -55,6 +55,8 @@ class JoinStep(BaseModel):
     right: str
     on: list[dict]
     relationship: str
+    trust: str = "certified"
+    key: str | None = None  # for confirming an inferred join
 
 
 class PathStep(BaseModel):

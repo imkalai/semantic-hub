@@ -150,7 +150,7 @@ def graph_spec(c: SemanticCatalog) -> GraphSpec:
         if j.approved:
             spec.edges.append({"source": node_id("table", j.left), "target": node_id("table", j.right), "rel": "JOINS",
                                "props": {"name": j.name, "on": [k.model_dump() for k in j.on],
-                                         "relationship": j.relationship}})
+                                         "relationship": j.relationship, "trust": j.trust, "approval_key": j.key}})
     for term, concept in synonym_pairs(c):
         sid = add("synonym", term, term, {})
         spec.edges.append({"source": sid, "target": concept, "rel": "SYNONYM_OF", "props": {}})

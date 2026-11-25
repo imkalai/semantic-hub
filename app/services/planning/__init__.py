@@ -12,6 +12,7 @@ from pydantic import BaseModel, ValidationError
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
+from app.models import CATALOG_SCOPE
 from app.schemas.plan import QueryPlan, ResolvedPlan
 from app.services.cortex import CortexError, get_cortex
 from app.services.cortex.prompts import plan_messages
@@ -31,6 +32,7 @@ class PlanAttempt(BaseModel):
 
 class PlanOutcome(BaseModel):
     question: str
+    scope: str = CATALOG_SCOPE
     status: Literal["ready", "clarify", "invalid", "blocked"]
     plan: QueryPlan | None = None
     resolved: ResolvedPlan | None = None
@@ -65,10 +67,10 @@ def parse_plan(text: str) -> tuple[QueryPlan | None, list[str]]:
         return None, [f"{'.'.join(str(p) for p in e['loc'])}: {e['msg']}" for e in exc.errors()[:8]]
 
 
-def plan_question(db: Session, question: str) -> PlanOutcome:
+def plan_question(db: Session, question: str, scope: str = CATALOG_SCOPE) -> PlanOutcome:
     settings = get_settings()
-    onto = get_ontology(db)
-    retrieval = retrieve(db, question)
+    onto = get_ontology(db, scope)
+    retrieval = retrieve(db, question, scope=scope)
     cortex = get_cortex()
     attempts: list[PlanAttempt] = []
     errors: list[str] = []
@@ -105,7 +107,7 @@ def plan_question(db: Session, question: str) -> PlanOutcome:
             node = onto.node(f"{kind}:{name}")
             if node:
                 labels[f"{kind}:{name}"] = node["label"]
-    common = {"question": question, "retrieval": retrieval, "attempts": attempts, "cortex": cortex.name,
+    common = {"question": question, "scope": scope, "retrieval": retrieval, "attempts": attempts, "cortex": cortex.name,
               "labels": labels, "guardrails": report}
     if plan is not None and plan.needs_clarification and not errors:
         return PlanOutcome(status="clarify", plan=plan, clarification=plan.needs_clarification, **common)

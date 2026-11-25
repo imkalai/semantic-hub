@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
+from app.models import CATALOG_SCOPE
 from app.schemas.catalog import normalize_term
 from app.services.cortex import get_cortex
 from app.services.ontology import get_ontology
@@ -22,7 +23,7 @@ from app.services.retrieval.metadata_store import load_metadata
 from app.services.retrieval.vector import VectorIndex
 
 log = logging.getLogger(__name__)
-MAX_NGRAM = 4
+MAX_NGRAM = 8  # long enough for generated labels like "total stock level units on hand"
 UNGOVERNED_WEIGHT = 0.8  # raw columns rank below catalog concepts with the same similarity
 STOP = {"a", "an", "the", "of", "by", "per", "for", "in", "on", "and", "or", "to", "what", "was", "is", "are",
         "were", "show", "me", "give", "list", "how", "many", "much", "which", "with", "from", "each", "every",
@@ -41,6 +42,7 @@ class Candidate(BaseModel):
     score: float
     governed: bool = True
     pii: bool = False
+    trust: str = "certified"  # certified | declared | inferred
     reasons: list[str] = Field(default_factory=list)
 
 
@@ -69,8 +71,8 @@ def _ngrams(tokens: list[str], covered: set[int]):
                 yield i, n, " ".join(tokens[i:i + n])
 
 
-def retrieve(db: Session, question: str, k: int = 8) -> RetrievalResult:
-    onto = get_ontology(db)
+def retrieve(db: Session, question: str, k: int = 8, scope: str = CATALOG_SCOPE) -> RetrievalResult:
+    onto = get_ontology(db, scope)
     tokens = normalize_term(question).split()
     found: dict[str, Candidate] = {}
 
@@ -83,7 +85,8 @@ def retrieve(db: Session, question: str, k: int = 8) -> RetrievalResult:
                                        label=node.get("label") or extra.get("label", cid),
                                        table=table or extra.get("table"), score=score,
                                        governed=extra.get("governed", True),
-                                       pii=bool((node.get("props") or {}).get("pii") or extra.get("pii")))
+                                       pii=bool((node.get("props") or {}).get("pii") or extra.get("pii")),
+                                       trust=(node.get("props") or {}).get("trust", "certified"))
         c.score = max(c.score, score)
         if reason not in c.reasons:
             c.reasons.append(reason)
@@ -126,9 +129,10 @@ def retrieve(db: Session, question: str, k: int = 8) -> RetrievalResult:
     mode, note = "vector+exact", ""
     if tokens:
         try:
-            hits = VectorIndex().query(get_cortex().embed([question])[0], n=k * 3)
+            hits = VectorIndex(scope).query(get_cortex().embed([question])[0], n=k * 3)
             if not hits:
-                mode, note = "exact_only", "The vector index is empty. Run: python -m app.cli index"
+                mode, note = "exact_only", ("The vector index is empty. Run: python -m app.cli index"
+                                            if scope == CATALOG_SCOPE else "The vector index is empty. Rebuild the session.")
             min_similarity = get_settings().retrieval_min_similarity
             for h in hits:
                 sim = h["similarity"]

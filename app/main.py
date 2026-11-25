@@ -5,7 +5,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.api import catalog, questions, retrieval, system
+from app.api import catalog, questions, retrieval, sessions, system
 from app.config import APP_NAME, APP_VERSION, BASE_DIR, get_settings
 from app.db import init_db, new_session, reset_engine
 from app.services.catalog import CatalogError
@@ -97,6 +97,9 @@ async def security(request: Request, call_next):
             response.headers.setdefault(k, v)
     if request.url.path.startswith("/api/"):
         response.headers.setdefault("Cache-Control", "no-store")
+    elif request.url.path == "/" or request.url.path.startswith("/static/"):
+        # Revalidate every time (cheap: unchanged files come back as 304), so updates show without a hard refresh
+        response.headers.setdefault("Cache-Control", "no-cache")
     return response
 
 
@@ -116,7 +119,7 @@ async def catalog_error(_: Request, exc: CatalogError):
     return JSONResponse(status_code=503, content={"detail": str(exc)})
 
 
-for r in (system.router, catalog.router, retrieval.router, questions.router):
+for r in (system.router, catalog.router, retrieval.router, questions.router, sessions.router):
     app.include_router(r)
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")

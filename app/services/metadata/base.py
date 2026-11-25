@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 
-from app.schemas.meta import DatasetInfo, ProjectInfo, TableInfo, TableMeta
+from app.schemas.meta import DatasetInfo, KeyConstraint, ProjectInfo, TableInfo, TableMeta
 
 
 class MetadataError(Exception):
@@ -23,3 +23,7 @@ class MetadataProvider(ABC):
     @abstractmethod
     def dry_run_bytes(self, project: str, sql: str) -> int | None:
         """Bytes BigQuery would read for this query, or None if it can't be estimated."""
+
+    def get_constraints(self, project: str, dataset: str) -> list[KeyConstraint]:
+        """Primary and foreign keys declared on the dataset's tables. Empty when none are declared."""
+        return []

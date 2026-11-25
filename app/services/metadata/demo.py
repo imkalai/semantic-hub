@@ -3,7 +3,7 @@
 Switch to real BigQuery with SH_METADATA_MODE=live.
 """
 
-from app.schemas.meta import ColumnMeta, DatasetInfo, ProjectInfo, TableInfo, TableMeta
+from app.schemas.meta import ColumnMeta, DatasetInfo, KeyConstraint, ProjectInfo, TableInfo, TableMeta
 from app.services.metadata.base import MetadataError, MetadataProvider
 from app.services.metadata.pii import mark_pii
 from app.services.text import humanize
@@ -160,3 +160,19 @@ class DemoMetadata(MetadataProvider):
 
     def dry_run_bytes(self, project: str, sql: str) -> int | None:
         return None  # demo mode estimates from table sizes instead
+
+    def get_constraints(self, project: str, dataset: str) -> list[KeyConstraint]:
+        if (project, dataset) not in _TABLES:
+            raise MetadataError(f"Dataset '{project}.{dataset}' wasn't found, or you don't have access to it.")
+        return [c for c in _CONSTRAINTS if c.table.startswith(f"{project}.{dataset}.")]
+
+
+# Keys declared on a few demo tables, as a data team might declare them in BigQuery. The rest are inferred.
+_S = "acme-analytics.sales"
+_CONSTRAINTS = [
+    KeyConstraint(kind="primary", table=f"{_S}.orders", columns=["order_id"]),
+    KeyConstraint(kind="primary", table=f"{_S}.customers", columns=["customer_id"]),
+    KeyConstraint(kind="primary", table=f"{_S}.products", columns=["product_id"]),
+    KeyConstraint(kind="foreign", table=f"{_S}.orders", columns=["customer_id"],
+                  ref_table=f"{_S}.customers", ref_columns=["customer_id"]),
+]

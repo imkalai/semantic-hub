@@ -4,6 +4,9 @@
     python -m app.cli index [--rebuild]       refresh BigQuery metadata and update the vector index
     python -m app.cli search "question"       show what metadata retrieval finds
     python -m app.cli plan "question"         plan a question; exit code 1 unless the plan is ready
+    python -m app.cli session create --name N --tables p.d.t1,p.d.t2   build a session from BigQuery tables
+    python -m app.cli session list | build <id> | review <id>
+    (search and plan take --session <id> to work in a session)
     python -m app.cli healthcheck [--json]    run every check; exit code 1 when not ready
 """
 
@@ -39,6 +42,49 @@ def _bootstrap(args) -> int:
     return 0
 
 
+def _scope(args) -> str:
+    return f"session:{args.session}" if getattr(args, "session", None) else "catalog"
+
+
+def _session(args) -> int:
+    from app.models import HubSession
+    from app.services.sessions import SessionError, build_session, create_session, review_items
+
+    init_db()
+    with new_session() as db:
+        try:
+            if args.action == "create":
+                tables = [t for t in (args.tables or "").split(",") if t.strip()]
+                s = create_session(db, args.name or "", tables)
+            elif args.action == "list":
+                for s in db.query(HubSession).order_by(HubSession.id):
+                    print(f"  {s.id:>3}  {s.status:<7} {s.name}  ({len(s.tables)} tables)")
+                return 0
+            else:
+                s = db.get(HubSession, args.id or 0)
+                if s is None:
+                    print("No session with that id.", file=sys.stderr)
+                    return 1
+                if args.action == "build":
+                    s = build_session(db, s, force=args.force)
+                elif args.action == "review":
+                    for r in review_items(s):
+                        print(f"  {r['kind']:<9} {r['trust']:<9} {r['label']:<40} {r['detail']}")
+                        print(f"            key: {r['key']}")
+                    return 0
+        except SessionError as exc:
+            print(f"Session failed: {exc}", file=sys.stderr)
+            return 1
+        c = s.report.get("counts", {})
+        print(f"Session {s.id} '{s.name}': {s.status}")
+        for kind, by in c.items():
+            print(f"  {kind:<11} certified {by['certified']:>3} · declared {by['declared']:>3} · inferred {by['inferred']:>3}")
+        for n in s.report.get("notes", []):
+            print(f"  {n}")
+        print(f"  Ask with: python -m app.cli plan \"...\" --session {s.id}")
+    return 0
+
+
 def _index(args) -> int:
     init_db()
     with new_session() as db:
@@ -58,7 +104,7 @@ def _index(args) -> int:
 def _search(args) -> int:
     init_db()
     with new_session() as db:
-        r = retrieve(db, args.question, k=args.k)
+        r = retrieve(db, args.question, k=args.k, scope=_scope(args))
     print(f"{r.mode} · ontology: {r.ontology_source}" + (f" · {r.note}" if r.note else ""))
     for c in r.candidates:
         flags = ("" if c.governed else " [not in catalog]") + (" [personal data]" if c.pii else "")
@@ -72,8 +118,8 @@ def _plan(args) -> int:
     init_db()
     with new_session() as db:
         try:
-            o = plan_question(db, args.question)
-        except CortexError as exc:
+            o = plan_question(db, args.question, _scope(args))
+        except (CortexError, CatalogError) as exc:
             print(f"Planning failed: {exc}", file=sys.stderr)
             return 1
     print(f"{o.status} · {len(o.attempts)} attempt(s) · cortex: {o.cortex}")
@@ -130,11 +176,20 @@ def main(argv: list[str] | None = None) -> int:
     q = sub.add_parser("search", help="show what retrieval finds for a question")
     q.add_argument("question")
     q.add_argument("-k", type=int, default=8)
+    q.add_argument("--session", type=int, help="search a session instead of the curated catalog")
     q.set_defaults(func=_search)
-    p = sub.add_parser("plan", help="plan a question (retrieval, Cortex, ontology resolution)")
+    p = sub.add_parser("plan", help="plan a question (retrieval, Cortex, ontology resolution, guardrails)")
     p.add_argument("question")
+    p.add_argument("--session", type=int, help="plan in a session instead of the curated catalog")
     p.add_argument("--json", action="store_true", help="also print the plan JSON")
     p.set_defaults(func=_plan)
+    se = sub.add_parser("session", help="create, list, rebuild or review sessions built from BigQuery tables")
+    se.add_argument("action", choices=["create", "list", "build", "review"])
+    se.add_argument("id", type=int, nargs="?", help="session id (build, review)")
+    se.add_argument("--name", help="create: session name")
+    se.add_argument("--tables", help="create: comma-separated project.dataset.table names")
+    se.add_argument("--force", action="store_true", help="build: rebuild even if nothing changed")
+    se.set_defaults(func=_session)
     h = sub.add_parser("healthcheck", help="check config, storage, Cortex, BigQuery and ontology completeness")
     h.add_argument("--json", action="store_true", help="print the report as JSON")
     h.set_defaults(func=_healthcheck)

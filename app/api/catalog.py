@@ -6,16 +6,20 @@ from app.services.ontology import get_ontology
 
 router = APIRouter(prefix="/api/catalog", tags=["catalog"])
 KINDS = ("metric", "dimension", "table")
+# "catalog" = the curated catalog; "session:<id>" = a session's assembled catalog
+SCOPE = Query("catalog", pattern=r"^(catalog|session:\d{1,9})$")
 
 
 @router.get("")
-def catalog(db: Session = Depends(get_db)):
-    """Every concept in the ontology, grouped by kind, with where it was read from (graph store or JSON fallback)."""
-    onto = get_ontology(db)
+def catalog(scope: str = SCOPE, db: Session = Depends(get_db)):
+    """Every concept in the scope's ontology, grouped by kind, with where it was read from."""
+    onto = get_ontology(db, scope)
     joins = [{"left": onto.g.nodes[d["left"]]["name"], "right": onto.g.nodes[d["right"]]["name"],
-              "name": d.get("name", ""), "on": d.get("on", []), "relationship": d.get("relationship", "")}
+              "name": d.get("name", ""), "on": d.get("on", []), "relationship": d.get("relationship", ""),
+              "trust": d.get("trust", "certified"), "key": d.get("approval_key")}
              for _, _, d in onto.joins.edges(data=True)]
     return {
+        "scope": scope,
         "summary": onto.summary(),
         "metrics": onto.concepts("metric"),
         "dimensions": onto.concepts("dimension"),
@@ -25,8 +29,8 @@ def catalog(db: Session = Depends(get_db)):
 
 
 @router.get("/resolve")
-def resolve(term: str = Query(..., min_length=1, max_length=200), db: Session = Depends(get_db)):
-    onto = get_ontology(db)
+def resolve(term: str = Query(..., min_length=1, max_length=200), scope: str = SCOPE, db: Session = Depends(get_db)):
+    onto = get_ontology(db, scope)
     ids = onto.resolve_term(term)
     return {"term": term, "source": onto.source,
             "matches": [{"id": i, "kind": onto.g.nodes[i]["kind"], "label": onto.g.nodes[i]["label"],
@@ -35,8 +39,8 @@ def resolve(term: str = Query(..., min_length=1, max_length=200), db: Session = 
 
 @router.get("/join-path")
 def join_path(from_table: str = Query(..., alias="from"), to_table: str = Query(..., alias="to"),
-              db: Session = Depends(get_db)):
-    onto = get_ontology(db)
+              scope: str = SCOPE, db: Session = Depends(get_db)):
+    onto = get_ontology(db, scope)
     path = onto.join_path(from_table, to_table)
     if path is None:
         raise HTTPException(404, f"There's no approved join path between '{from_table}' and '{to_table}'.")

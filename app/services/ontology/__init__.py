@@ -7,8 +7,9 @@ from dataclasses import dataclass, field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import BootstrapRun
-from app.services.catalog import GraphSpec, LoadedCatalog, graph_spec, load_catalog
+from app.models import CATALOG_SCOPE, BootstrapRun, HubSession
+from app.schemas.catalog import SemanticCatalog
+from app.services.catalog import CatalogError, GraphSpec, LoadedCatalog, graph_spec, load_catalog
 from app.services.ontology.graph import Ontology
 from app.services.ontology.store import SqliteGraphStore
 
@@ -62,12 +63,18 @@ class BootstrapStep:
 
 
 def bootstrap(db: Session, loaded: LoadedCatalog | None = None, *, reset: bool = False) -> list[BootstrapStep]:
-    """Seed the graph store from the catalog. Safe to rerun: it adds what's missing, updates what changed
-    and removes what the catalog no longer lists. `reset` wipes the graph first."""
+    """Seed the curated catalog's graph from the catalog file. Safe to rerun: it adds what's missing, updates
+    what changed and removes what the catalog no longer lists. `reset` wipes the graph first."""
     loaded = loaded or load_catalog()
-    spec = graph_spec(loaded.catalog)
-    store = SqliteGraphStore(db)
-    run = BootstrapRun(catalog_version=loaded.catalog.version, catalog_hash=loaded.sha256)
+    return sync_graph(db, loaded.catalog, CATALOG_SCOPE, catalog_hash=loaded.sha256, reset=reset)
+
+
+def sync_graph(db: Session, catalog: SemanticCatalog, scope: str, *, catalog_hash: str = "",
+               reset: bool = False) -> list[BootstrapStep]:
+    """Make a scope's graph match a catalog (the curated one, or a session's assembled one)."""
+    spec = graph_spec(catalog)
+    store = SqliteGraphStore(db, scope)
+    run = BootstrapRun(scope=scope, catalog_version=catalog.version, catalog_hash=catalog_hash)
     steps: list[BootstrapStep] = []
     try:
         created = store.ensure_schema()
@@ -83,7 +90,7 @@ def bootstrap(db: Session, loaded: LoadedCatalog | None = None, *, reset: bool =
         steps.append(BootstrapStep("Seed metrics", **_sum(metrics, store.sync_edges(spec, {"MEASURES", "DERIVED_FROM"}))))
         steps.append(BootstrapStep("Seed dimensions",
                                    **_sum(_sum(dims, tables), store.sync_edges(spec, {"ATTRIBUTE_OF"})),
-                                   detail=f"including {len(loaded.catalog.tables)} tables"))
+                                   detail=f"including {len(catalog.tables)} tables"))
         steps.append(BootstrapStep("Seed approved joins", **store.sync_edges(spec, {"JOINS"})))
         syn = store.sync_nodes(spec, {"synonym"})
         steps.append(BootstrapStep("Seed synonyms", **_sum(syn, store.sync_edges(spec, {"SYNONYM_OF"}))))
@@ -92,14 +99,14 @@ def bootstrap(db: Session, loaded: LoadedCatalog | None = None, *, reset: bool =
         db.add(run)
         db.commit()
     except Exception as exc:
-        db.rollback()
+        db.rollback()  # the caller's other pending changes go too; sync runs in its own unit of work
         run.ok, run.error = False, str(exc)
         db.add(run)
         db.commit()
         raise
     finally:
-        invalidate()
-    log.info("Bootstrap finished: %s", run.summary)
+        invalidate(scope)
+    log.info("Graph %s synced: %s", scope, run.summary)
     return steps
 
 
@@ -109,44 +116,61 @@ def _sum(a: dict, b: dict) -> dict:
 
 # ---------- the ontology the rest of the app uses ----------
 
-_cache: Ontology | None = None
+_cache: dict[str, Ontology] = {}
 
 
-def invalidate() -> None:
-    global _cache
-    _cache = None
+def invalidate(scope: str | None = None) -> None:
+    if scope is None:
+        _cache.clear()
+    else:
+        _cache.pop(scope, None)
 
 
-def get_ontology(db: Session) -> Ontology:
-    """The graph store when it's usable and matches the catalog's concepts; otherwise the JSON catalog."""
-    global _cache
-    if _cache is not None:
-        return _cache
-    loaded = load_catalog()
-    expected = graph_spec(loaded.catalog)
-    store = SqliteGraphStore(db)
+def scope_catalog(db: Session, scope: str) -> SemanticCatalog:
+    """The catalog a scope's graph should match: the catalog file, or a session's assembled catalog."""
+    if scope == CATALOG_SCOPE:
+        return load_catalog().catalog
+    if not scope.startswith("session:") or not scope.split(":", 1)[1].isdigit():
+        raise CatalogError(f"Unknown scope '{scope}'.")
+    row = db.get(HubSession, int(scope.split(":", 1)[1]))
+    if row is None:
+        raise CatalogError("That session doesn't exist.")
+    if not row.catalog:
+        raise CatalogError(f"Session '{row.name}' hasn't been built yet.")
+    return SemanticCatalog.model_validate(row.catalog)
+
+
+def get_ontology(db: Session, scope: str = CATALOG_SCOPE) -> Ontology:
+    """The scope's graph when it's usable and matches its catalog; otherwise that catalog itself."""
+    if scope in _cache:
+        return _cache[scope]
+    expected = graph_spec(scope_catalog(db, scope))
+    store = SqliteGraphStore(db, scope)
     note = ""
     try:
         if not store.schema_ok() or store.is_empty():
-            note = "The graph store hasn't been bootstrapped yet."
+            note = ("The graph store hasn't been bootstrapped yet." if scope == CATALOG_SCOPE
+                    else "The session's graph hasn't been built yet.")
         else:
             actual = store.load()
             check = compare(expected, actual)
             if check.complete:
-                _cache = Ontology(actual, "graph_store")
-                return _cache
+                _cache[scope] = Ontology(actual, "graph_store")
+                return _cache[scope]
             note = (f"The graph store is incomplete ({len(check.missing_nodes)} missing concepts, "
                     f"{len(check.missing_edges)} missing links, {len(check.changed_nodes)} out of date).")
     except Exception as exc:  # noqa: BLE001  (a broken store must not stop the app)
-        log.warning("Graph store unusable, using the JSON catalog", exc_info=True)
+        log.warning("Graph store unusable, using the catalog", exc_info=True)
         note = f"The graph store couldn't be read: {exc}"
-    _cache = Ontology(expected, "json_fallback", note=note + " Using the JSON catalog instead.")
-    return _cache
+    what = "the JSON catalog" if scope == CATALOG_SCOPE else "the session's assembled catalog"
+    _cache[scope] = Ontology(expected, "json_fallback", note=f"{note} Using {what} instead.")
+    return _cache[scope]
 
 
-def last_bootstrap(db: Session) -> BootstrapRun | None:
-    return db.scalars(select(BootstrapRun).order_by(BootstrapRun.id.desc()).limit(1)).first()
+def last_bootstrap(db: Session, scope: str = CATALOG_SCOPE) -> BootstrapRun | None:
+    return db.scalars(select(BootstrapRun).where(BootstrapRun.scope == scope)
+                      .order_by(BootstrapRun.id.desc()).limit(1)).first()
 
 
-__all__ = ["Ontology", "SqliteGraphStore", "Completeness", "BootstrapStep", "bootstrap", "compare",
-           "get_ontology", "invalidate", "last_bootstrap"]
+__all__ = ["Ontology", "SqliteGraphStore", "Completeness", "BootstrapStep", "bootstrap", "sync_graph", "compare",
+           "get_ontology", "invalidate", "last_bootstrap", "scope_catalog", "CATALOG_SCOPE"]

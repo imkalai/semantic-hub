@@ -85,7 +85,8 @@ def build_documents(onto: Ontology, metadata: dict[str, TableMeta]) -> list[Doc]
 
     # Keys are plumbing, not things people ask about: leave them out of the column documents.
     for name, t in tables.items():
-        used.add((name, t["props"]["primary_key"]))
+        if t["props"].get("primary_key"):
+            used.add((name, t["props"]["primary_key"]))
     for _, _, j in onto.joins.edges(data=True):
         left, right = onto.g.nodes[j["left"]]["name"], onto.g.nodes[j["right"]]["name"]
         for k in j.get("on", []):

@@ -46,6 +46,15 @@ class Settings(BaseSettings):
     max_rows: int = 5000
     plan_attempts: int = 2  # first try + one retry with the reasons the plan was rejected
 
+    # Sessions
+    max_session_tables: int = 60
+
+    # Looker: placeholder for a future integration. "off" until Looker is available.
+    looker_mode: Literal["off"] = "off"
+    looker_base_url: str = ""
+    looker_client_id: str = ""
+    looker_client_secret: str = ""
+
     # Guardrails
     allow_pii: bool = False  # group by or filter on personal-data dimensions
     large_table_gb: float = 50.0  # tables this big must be limited to a period (partition pruning)

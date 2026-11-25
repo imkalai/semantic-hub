@@ -32,6 +32,10 @@ class _AllowedProjectsOnly(MetadataProvider):
     def dry_run_bytes(self, project: str, sql: str) -> int | None:
         return self.inner.dry_run_bytes(project, sql)
 
+    def get_constraints(self, project: str, dataset: str):
+        self._check(project)
+        return self.inner.get_constraints(project, dataset)
+
 
 def get_metadata_provider() -> MetadataProvider:
     settings = get_settings()

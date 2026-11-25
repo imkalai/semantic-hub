@@ -109,7 +109,8 @@ def resolve(onto: Ontology, plan: QueryPlan) -> tuple[ResolvedPlan | None, list[
                     mp.steps.append(ps)
                 joins.setdefault(step["name"], JoinStep(
                     name=step["name"], left=onto.g.nodes[step["left"]]["name"], right=onto.g.nodes[step["right"]]["name"],
-                    on=step.get("on", []), relationship=step.get("relationship", "")))
+                    on=step.get("on", []), relationship=step.get("relationship", ""),
+                    trust=step.get("trust", "certified"), key=step.get("approval_key")))
         paths.append(mp)
     if errors:
         return None, list(dict.fromkeys(errors))

@@ -17,7 +17,21 @@ def normalize_term(term: str) -> str:
     return " ".join(re.findall(r"[a-z0-9]+", term.lower()))
 
 
-class _Concept(BaseModel):
+Trust = Literal["certified", "declared", "inferred"]
+
+
+class _Provenance(BaseModel):
+    """Where a concept came from, and how far it can be trusted.
+
+    certified: the curated catalog, Looker, or a person's approval. declared: stated in BigQuery (keys,
+    policy tags). inferred: guessed from names and types; usable, but flagged until someone confirms it."""
+
+    trust: Trust = "certified"
+    source: str = "catalog"  # catalog | approved | looker | bigquery | inferred
+    key: str | None = None  # stable id for approvals, e.g. "metric:acme.sales.orders:amount:sum"
+
+
+class _Concept(_Provenance):
     name: str
     label: str = ""
     description: str = ""
@@ -33,7 +47,7 @@ class _Concept(BaseModel):
 
 class CatalogTable(_Concept):
     table: str  # project.dataset.table in BigQuery
-    primary_key: str
+    primary_key: str | None = None
     time_column: str | None = None
 
     @field_validator("table")
@@ -78,7 +92,7 @@ class JoinKey(BaseModel):
     right: str
 
 
-class CatalogJoin(BaseModel):
+class CatalogJoin(_Provenance):
     name: str
     left: str  # table names from the catalog
     right: str

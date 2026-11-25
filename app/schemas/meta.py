@@ -47,6 +47,7 @@ class TableMeta(BaseModel):
     partition_type: str | None = None
     clustering: list[str] = Field(default_factory=list)
     history_months: int | None = None  # demo data only: how many months the table covers
+    last_modified: str | None = None  # ISO time; changes when data or schema change
     columns: list[ColumnMeta] = Field(default_factory=list)
 
     def column(self, name: str) -> ColumnMeta | None:
@@ -56,6 +57,16 @@ class TableMeta(BaseModel):
     @property
     def full_name(self) -> str:
         return f"{self.project}.{self.dataset}.{self.name}"
+
+
+class KeyConstraint(BaseModel):
+    """A primary or foreign key declared in BigQuery (declared, not enforced)."""
+
+    kind: str  # "primary" | "foreign"
+    table: str  # project.dataset.table
+    columns: list[str]
+    ref_table: str | None = None  # foreign keys: the table referenced
+    ref_columns: list[str] = Field(default_factory=list)
 
 
 class ProjectInfo(BaseModel):
